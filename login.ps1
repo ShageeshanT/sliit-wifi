@@ -2,9 +2,10 @@
 #
 # Modes:
 #   login.ps1            - run the login flow (default)
+#   login.ps1 -DryRun    - full flow except the final POST; prints what it would send
 #   login.ps1 -Setup     - interactively save DPAPI-encrypted credentials
 #   login.ps1 -Install   - register the scheduled task (on-logon + on-network-connect)
-#   login.ps1 -Uninstall - remove the scheduled task
+#   login.ps1 -Uninstall - remove the scheduled task (prompts to delete creds too)
 #
 # Credentials are stored in creds.xml via Export-Clixml - DPAPI-encrypted under
 # the current Windows user. No other account on this machine can decrypt them.
@@ -13,21 +14,51 @@
 param(
     [switch]$Setup,
     [switch]$Install,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$DryRun,
+    [switch]$Force     # skip "delete creds.xml?" prompt during -Uninstall
 )
 
 $ErrorActionPreference = 'Stop'
 
+# ---------------------------------------------------------------------------
+# Configurable
+# ---------------------------------------------------------------------------
+# Skip the login flow if the current Wi-Fi SSID doesn't match this wildcard.
+# Examples: '*SLIIT*', 'SLIIT-BYOD', '*'   (set to $null to disable)
+$SsidFilter      = '*SLIIT*'
+
+# Log rotation: if login.log exceeds $MaxLogBytes, truncate to last $MaxLogKeepLines
+$MaxLogBytes     = 262144   # 256 KB
+$MaxLogKeepLines = 500
+
+# ---------------------------------------------------------------------------
+# Paths / constants
+# ---------------------------------------------------------------------------
 $scriptDir = $PSScriptRoot
 $logPath   = Join-Path $scriptDir 'login.log'
 $credPath  = Join-Path $scriptDir 'creds.xml'
 $oldCfg    = Join-Path $scriptDir 'config.txt'
 $vbsPath   = Join-Path $scriptDir 'SLIIT Wifi.vbs'
+$debugHtml = Join-Path $scriptDir 'portal-debug.html'
 $taskName  = 'SLIIT Wifi Auto-Login'
+$probeUrl  = 'http://www.msftconnecttest.com/connecttest.txt'
 
 # ---------------------------------------------------------------------------
-# Logging
+# Log rotation + logging
 # ---------------------------------------------------------------------------
+function Invoke-LogRotation {
+    if (-not (Test-Path $logPath)) { return }
+    try {
+        $size = (Get-Item $logPath).Length
+        if ($size -le $MaxLogBytes) { return }
+        $tail = Get-Content $logPath -Tail $MaxLogKeepLines -Encoding utf8
+        $header = "--- log rotated at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (was $size bytes) ---"
+        Set-Content -Path $logPath -Value (@($header) + $tail) -Encoding utf8
+    } catch { }
+}
+Invoke-LogRotation
+
 function Write-Log($msg) {
     $line = "{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
     try { Add-Content -Path $logPath -Value $line -Encoding utf8 } catch { }
@@ -44,11 +75,9 @@ function Save-PortalCredential {
 }
 
 function Get-PortalCredential {
-    # Prefer encrypted store
     if (Test-Path $credPath) {
         return (Import-Clixml -Path $credPath)
     }
-
     # One-time migration from legacy plaintext config.txt
     if (Test-Path $oldCfg) {
         Write-Log 'Migrating plaintext config.txt -> creds.xml (DPAPI)'
@@ -58,10 +87,7 @@ function Get-PortalCredential {
         }
         $sec = ConvertTo-SecureString $cfg.password -AsPlainText -Force
         Save-PortalCredential -User $cfg.username -SecPass $sec
-
-        # Shred the plaintext file
         try {
-            # Overwrite then delete, just to be thorough
             $junk = 'x' * 256
             Set-Content -Path $oldCfg -Value $junk -NoNewline -Encoding utf8
             Remove-Item $oldCfg -Force
@@ -71,12 +97,53 @@ function Get-PortalCredential {
         }
         return (Import-Clixml -Path $credPath)
     }
-
     throw "No credentials on disk. Run: powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Setup"
 }
 
 # ---------------------------------------------------------------------------
-# -Setup : interactive credential entry
+# SSID detection (via netsh)
+# ---------------------------------------------------------------------------
+function Get-CurrentSsid {
+    # Returns the SSID of the first connected wireless interface, or $null
+    # (wired / no wifi / netsh error).
+    try {
+        $out = netsh wlan show interfaces 2>$null
+        if (-not $out) { return $null }
+        foreach ($line in $out) {
+            # Match "SSID : foo" but NOT "BSSID : ..." — require a word boundary before SSID
+            if ($line -match '^\s*SSID\s*:\s*(.+?)\s*$' -and $line -notmatch 'BSSID') {
+                $ssid = $Matches[1].Trim()
+                if ($ssid) { return $ssid }
+            }
+        }
+    } catch { }
+    return $null
+}
+
+# ---------------------------------------------------------------------------
+# Probe: returns a hashtable describing current connectivity state
+# ---------------------------------------------------------------------------
+function Test-PortalState {
+    try {
+        $resp = Invoke-WebRequest -Uri $probeUrl -UseBasicParsing -TimeoutSec 10 `
+                                  -MaximumRedirection 5 -SessionVariable s
+    } catch {
+        return @{ Status = 'Offline'; Error = $_.Exception.Message }
+    }
+    $finalUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
+    if ($resp.Content -match 'Microsoft Connect Test' -and $finalUrl -notmatch 'fgtauth') {
+        return @{ Status = 'Online'; FinalUrl = $finalUrl }
+    }
+    return @{
+        Status   = 'Gated'
+        Response = $resp
+        FinalUrl = $finalUrl
+        Session  = $s
+    }
+}
+
+# ---------------------------------------------------------------------------
+# -Setup
 # ---------------------------------------------------------------------------
 function Invoke-Setup {
     Write-Host ''
@@ -86,33 +153,25 @@ function Invoke-Setup {
     if (-not $u) { throw 'Username cannot be empty' }
     $p = Read-Host 'SLIIT password' -AsSecureString
     if ($p.Length -eq 0) { throw 'Password cannot be empty' }
-
     Save-PortalCredential -User $u -SecPass $p
-
     if (Test-Path $oldCfg) {
         Remove-Item $oldCfg -Force
         Write-Host 'Removed plaintext config.txt' -ForegroundColor Yellow
     }
     Write-Host ''
-    Write-Host "OK - credentials saved (DPAPI-encrypted) to:" -ForegroundColor Green
+    Write-Host 'OK - credentials saved (DPAPI-encrypted) to:' -ForegroundColor Green
     Write-Host "  $credPath"
-    Write-Host 'Only your Windows user account can decrypt this file.'
 }
 
 # ---------------------------------------------------------------------------
-# -Install : register scheduled task (logon + network-connect event)
+# -Install
 # ---------------------------------------------------------------------------
 function Invoke-Install {
     if (-not (Test-Path $vbsPath)) { throw "Launcher not found: $vbsPath" }
 
-    # Action: run the silent .vbs wrapper (truly hidden - no flashing window)
     $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$vbsPath`""
-
-    # Trigger 1: at current-user logon
     $trigLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:UserName
 
-    # Trigger 2: on NetworkProfile connect (event 10000). Fires every time you
-    # join a Wi-Fi network or bring an interface up.
     $eventXml = @'
 <QueryList>
   <Query Id="0" Path="Microsoft-Windows-NetworkProfile/Operational">
@@ -125,23 +184,20 @@ function Invoke-Install {
     $trigEvent = New-CimInstance -CimClass $cimClass -ClientOnly
     $trigEvent.Enabled      = $true
     $trigEvent.Subscription = $eventXml
-    $trigEvent.Delay        = 'PT3S'   # 3s delay so DNS / DHCP settle
+    $trigEvent.Delay        = 'PT3S'
 
     $settings = New-ScheduledTaskSettingsSet `
-        -StartWhenAvailable `
-        -MultipleInstances IgnoreNew `
-        -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable -MultipleInstances IgnoreNew `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
 
-    $principal = New-ScheduledTaskPrincipal -UserId $env:UserName -LogonType Interactive -RunLevel Limited
+    $principal = New-ScheduledTaskPrincipal -UserId $env:UserName `
+                                            -LogonType Interactive -RunLevel Limited
 
-    $task = New-ScheduledTask `
-        -Action    $action `
-        -Trigger   @($trigLogon, $trigEvent) `
-        -Settings  $settings `
-        -Principal $principal `
-        -Description 'Auto-login to SLIIT Wi-Fi captive portal'
+    $task = New-ScheduledTask -Action $action `
+                              -Trigger @($trigLogon, $trigEvent) `
+                              -Settings $settings -Principal $principal `
+                              -Description 'Auto-login to SLIIT Wi-Fi captive portal'
 
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     Register-ScheduledTask   -TaskName $taskName -InputObject $task | Out-Null
@@ -151,13 +207,31 @@ function Invoke-Install {
     Write-Host 'Triggers:'
     Write-Host '  * At user logon'
     Write-Host '  * Network connect (NetworkProfile event 10000, +3s delay)'
-    Write-Host ''
-    Write-Host "Manual test: Start-ScheduledTask -TaskName '$taskName'"
 }
 
+# ---------------------------------------------------------------------------
+# -Uninstall
+# ---------------------------------------------------------------------------
 function Invoke-Uninstall {
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     Write-Host "Removed scheduled task '$taskName'." -ForegroundColor Yellow
+
+    if (Test-Path $credPath) {
+        $delete = $Force
+        if (-not $Force) {
+            $ans = Read-Host 'Also delete saved credentials (creds.xml)? [y/N]'
+            $delete = ($ans -match '^(y|yes)$')
+        }
+        if ($delete) {
+            Remove-Item $credPath -Force
+            Write-Host 'Deleted creds.xml.' -ForegroundColor Yellow
+        } else {
+            Write-Host 'Kept creds.xml.'
+        }
+    }
+    if (Test-Path $debugHtml) {
+        Remove-Item $debugHtml -Force -ErrorAction SilentlyContinue
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -171,36 +245,55 @@ if ($Uninstall) { Invoke-Uninstall; exit 0 }
 # Default mode: run login flow
 # ---------------------------------------------------------------------------
 try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    # --- SSID filter (skip cheap & early if not on SLIIT) ------------------
+    $ssid = Get-CurrentSsid
+    if ($ssid -and $SsidFilter -and ($ssid -notlike $SsidFilter)) {
+        Write-Log "SSID '$ssid' does not match filter '$SsidFilter' - skipping."
+        exit 0
+    }
+    if ($ssid) {
+        Write-Log "On Wi-Fi SSID: $ssid"
+    } else {
+        Write-Log 'No Wi-Fi SSID detected (wired or unknown) - proceeding.'
+    }
+
     $cred = Get-PortalCredential
     $user = $cred.UserName
     $pass = $cred.GetNetworkCredential().Password
 
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $probe    = 'http://www.msftconnecttest.com/connecttest.txt'
     $attempts = 3
-
     for ($i = 1; $i -le $attempts; $i++) {
-        Write-Log "Attempt $i/$attempts - probing $probe"
+        Write-Log "Attempt $i/$attempts - probing $probeUrl"
+        $state = Test-PortalState
 
-        try {
-            $resp = Invoke-WebRequest -Uri $probe -UseBasicParsing -TimeoutSec 10 `
-                                      -MaximumRedirection 5 -SessionVariable session
-        } catch {
-            Write-Log "Probe failed: $($_.Exception.Message)"
+        if ($state.Status -eq 'Offline') {
+            Write-Log "Probe failed: $($state.Error)"
             if ($i -lt $attempts) { Start-Sleep -Seconds ([int][Math]::Pow(2, $i)); continue }
-            throw
+            throw $state.Error
         }
 
-        $finalUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
-        Write-Log "Landed: $finalUrl"
+        Write-Log "Landed: $($state.FinalUrl)"
 
-        # Already online? MSFT probe returns exactly "Microsoft Connect Test".
-        if ($resp.Content -match 'Microsoft Connect Test' -and $finalUrl -notmatch 'fgtauth') {
+        if ($state.Status -eq 'Online') {
             Write-Log 'Already online - exiting.'
             exit 0
         }
 
-        # Extract FortiGate magic token from the form, or fall back to URL query
+        # --- Gated. Parse magic + 4Tredir from FortiGate response ----------
+        $resp = $state.Response
+        $session = $state.Session
+        $finalUrl = $state.FinalUrl
+
+        # Dump portal HTML on first gated run (or on -DryRun) for debugging
+        if ($DryRun -or -not (Test-Path $debugHtml)) {
+            try {
+                Set-Content -Path $debugHtml -Value $resp.Content -Encoding utf8
+                Write-Log "Wrote portal HTML to $debugHtml ($($resp.Content.Length) bytes)"
+            } catch { Write-Log "Could not dump portal HTML: $($_.Exception.Message)" }
+        }
+
         $magic = $null
         if ($resp.Content -match 'name="?magic"?\s+value="([0-9a-fA-F]+)"') {
             $magic = $Matches[1]
@@ -208,21 +301,43 @@ try {
             $magic = $Matches[1]
         }
 
-        $redir = $probe
+        $redir = $probeUrl
         if ($resp.Content -match 'name="?4Tredir"?\s+value="([^"]+)"') { $redir = $Matches[1] }
 
         if (-not $magic) {
-            Write-Log "No magic token in response - not on SLIIT portal? Will retry."
+            Write-Log 'No magic token in response - not on SLIIT portal? Will retry.'
             if ($i -lt $attempts) { Start-Sleep -Seconds ([int][Math]::Pow(2, $i)); continue }
             Write-Log "Giving up after $attempts attempts."
             exit 3
         }
 
-        Write-Log "magic=$magic  4Tredir=$redir"
-
-        $portalBase = ([Uri]$finalUrl).GetLeftPart([UriPartial]::Authority)  # http://auth.sliit.lk:1003
+        $portalBase = ([Uri]$finalUrl).GetLeftPart([UriPartial]::Authority)
         $postUrl    = "$portalBase/"
 
+        Write-Log "Parsed: magic=$magic  4Tredir=$redir  postUrl=$postUrl"
+
+        # --- Dry run: stop here ----------------------------------------------
+        if ($DryRun) {
+            $passLen = $pass.Length
+            Write-Log '[DRY RUN] Would POST the following body (password redacted):'
+            Write-Log "[DRY RUN]   4Tredir  = $redir"
+            Write-Log "[DRY RUN]   magic    = $magic"
+            Write-Log "[DRY RUN]   username = $user"
+            Write-Log "[DRY RUN]   password = <redacted, $passLen chars>"
+            Write-Log "[DRY RUN] Target   = $postUrl"
+            Write-Log "[DRY RUN] Portal HTML saved at $debugHtml"
+            Write-Log '[DRY RUN] Nothing submitted. Exit 0.'
+
+            Write-Host ''
+            Write-Host "[DRY RUN] magic   : $magic"
+            Write-Host "[DRY RUN] 4Tredir : $redir"
+            Write-Host "[DRY RUN] target  : $postUrl"
+            Write-Host "[DRY RUN] HTML    : $debugHtml"
+            Write-Host "[DRY RUN] No credentials submitted." -ForegroundColor Cyan
+            exit 0
+        }
+
+        # --- Real POST -------------------------------------------------------
         $body = @{
             '4Tredir' = $redir
             magic     = $magic
@@ -232,22 +347,29 @@ try {
 
         Write-Log "POST $postUrl"
         try {
-            $login = Invoke-WebRequest -Uri $postUrl -Method Post -Body $body `
-                                       -UseBasicParsing -TimeoutSec 15 `
-                                       -MaximumRedirection 5 -WebSession $session
+            $null = Invoke-WebRequest -Uri $postUrl -Method Post -Body $body `
+                                      -UseBasicParsing -TimeoutSec 15 `
+                                      -MaximumRedirection 5 -WebSession $session
         } catch {
             Write-Log "POST failed: $($_.Exception.Message)"
             if ($i -lt $attempts) { Start-Sleep -Seconds ([int][Math]::Pow(2, $i)); continue }
             throw
         }
 
-        if ($login.Content -match '(?i)authentication\s+required|invalid\s+credentials|login\s+failed') {
-            Write-Log "Login FAILED (bad credentials?) Status=$($login.StatusCode)"
-            exit 2
+        # --- Verify by re-probing. This is the real success check. ----------
+        Start-Sleep -Seconds 1
+        $verify = Test-PortalState
+        if ($verify.Status -eq 'Online') {
+            Write-Log "Login OK - post-login probe confirms online ($($verify.FinalUrl))."
+            exit 0
         }
-
-        Write-Log "Login OK. Status=$($login.StatusCode) Final=$($login.BaseResponse.ResponseUri.AbsoluteUri)"
-        exit 0
+        Write-Log "Login FAILED - post-login probe still gated/offline: status=$($verify.Status) url=$($verify.FinalUrl)"
+        if ($i -lt $attempts) {
+            Write-Log 'Retrying...'
+            Start-Sleep -Seconds ([int][Math]::Pow(2, $i))
+            continue
+        }
+        exit 2
     }
 }
 catch {
