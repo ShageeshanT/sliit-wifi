@@ -1,0 +1,29 @@
+# --- Secrets / credentials ---------------------------------------------------
+# DPAPI-encrypted, but still machine/user-bound and not meant to be shared.
+creds.xml
+# Legacy plaintext config (pre-migration). Never commit.
+config.txt
+
+# --- Runtime artifacts -------------------------------------------------------
+login.log
+*.log
+PowerShell_transcript.*
+
+# --- Tooling / editor --------------------------------------------------------
+.claude/
+.vscode/
+.idea/
+
+# --- Windows cruft -----------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+*.lnk.bak
+
+# --- Temporary files ---------------------------------------------------------
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
