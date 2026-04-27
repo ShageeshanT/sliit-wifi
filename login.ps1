@@ -286,6 +286,25 @@ try {
         $session = $state.Session
         $finalUrl = $state.FinalUrl
 
+        # SLIIT's FortiGate intercepts with a tiny HTML page containing a
+        # JavaScript redirect (not an HTTP 302), so Invoke-WebRequest doesn't
+        # follow it automatically. Detect and follow it manually.
+        if ($resp.Content -match 'window\.location\s*=\s*["'']([^"'']*fgtauth[^"'']*)["'']') {
+            $jsUrl = $Matches[1]
+            Write-Log "JS redirect detected -> $jsUrl"
+            try {
+                $resp     = Invoke-WebRequest -Uri $jsUrl -UseBasicParsing -TimeoutSec 10 `
+                                              -MaximumRedirection 5 -WebSession $session
+                $finalUrl = $resp.BaseResponse.ResponseUri.AbsoluteUri
+                Write-Log "Followed to: $finalUrl ($($resp.Content.Length) bytes)"
+            } catch {
+                # Even if fetching the real portal fails, we can still POST —
+                # the magic is in the URL query string.
+                Write-Log "Could not fetch JS target: $($_.Exception.Message)"
+                $finalUrl = $jsUrl
+            }
+        }
+
         # Dump portal HTML on first gated run (or on -DryRun) for debugging
         if ($DryRun -or -not (Test-Path $debugHtml)) {
             try {
