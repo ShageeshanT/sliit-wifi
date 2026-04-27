@@ -1,85 +1,148 @@
 # SLIIT Wi-Fi Auto-Login
 
-> Silent, automatic login to the SLIIT `auth.sliit.lk` captive portal. Connect to Wi-Fi, get internet. No browser. No typing. No popups.
+> **Connect to SLIIT Wi-Fi. Get internet. That's it.**
+> Zero clicks, zero typing, zero browser popups — every time, automatically.
 
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE?logo=powershell&logoColor=white)
 ![No deps](https://img.shields.io/badge/dependencies-none-success)
 ![Credentials](https://img.shields.io/badge/credentials-DPAPI%20encrypted-important)
+![License](https://img.shields.io/badge/license-MIT-blue)
 
 ```
  ┌──────────────┐     ┌──────────────┐     ┌──────────────────┐
  │ Wi-Fi joined │ ──► │ Task Sched.  │ ──► │  login.ps1       │
- │  (SLIIT)     │     │  fires (3s)  │     │  POSTs to portal │
+ │  (SLIIT-STD) │     │  fires (3s)  │     │  POSTs to portal │
  └──────────────┘     └──────────────┘     └────────┬─────────┘
                                                     │
                                                     ▼
-                                            You have internet.
+                                         You have internet. Silently.
 ```
 
 ---
 
-## What it does
+## ⚡ The headline feature: fully automatic login
 
-SLIIT Wi-Fi sits behind a **FortiGate captive portal** — you can't use the internet until you submit your SLIIT credentials at `auth.sliit.lk:1003`. This tool does that for you, silently, every time you connect.
+Once installed, **you never interact with this tool again**. It runs in the background as a Windows Scheduled Task that listens for network-connect events. The moment your laptop joins SLIIT-STD, the script:
 
-- **Zero-interaction.** A Windows Scheduled Task watches for network-connect events and runs the script automatically.
-- **Direct HTTP POST.** No browser automation, no SendKeys, no focus races. Parses the FortiGate `magic` token and posts credentials straight to the portal.
-- **Safe everywhere else.** Detects when you're already online (home / hotspot / any non-captive network) and exits in under a second.
-- **Encrypted credentials.** Your password is sealed with Windows DPAPI — only your user account on your machine can read it.
+1. Detects the FortiGate captive portal
+2. Follows the JavaScript redirect to the login form
+3. Extracts the session token (`magic`)
+4. POSTs your credentials over HTTPS
+5. Verifies you're online by re-probing the network
+
+All in **under 5 seconds**, with no window flash, no taskbar blip, no notification.
+
+On any other Wi-Fi (home, mobile hotspot, café), the script checks the SSID, sees it's not SLIIT, and exits silently. Zero impact when you're off-campus.
+
+---
+
+## What it actually does
+
+SLIIT's Wi-Fi sits behind a **FortiGate `fgtauth` captive portal** at `https://auth.sliit.lk:1003`. Until you submit your SLIIT credentials there, every HTTP request gets intercepted with a JavaScript-redirect page. This tool automates that submission.
+
+It's a single PowerShell script, no third-party libraries, no installer beyond Windows itself.
+
+### Highlights
+
+- **🔒 Credentials encrypted with Windows DPAPI** — sealed to your user account; useless on any other machine.
+- **🤖 Auto-login on Wi-Fi connect** — Scheduled Task triggers on `NetworkProfile` event 10000 (logged every time Windows joins a network).
+- **🚦 SSID-aware** — only runs on networks matching `*SLIIT*`; pure no-op everywhere else.
+- **🛡️ Robust verification** — confirms login by re-probing, not by string-matching error pages. Retries with exponential backoff.
+- **🪵 Self-rotating logs** — `login.log` capped at 256 KB, automatically trimmed.
+- **🔍 Dry-run mode** — see exactly what the script would POST, without submitting.
+- **📱 Works on phones too** — bookmarklet for one-tap login on iPhone & Android (see below).
 
 ---
 
 ## Quick start
 
-### 1. Drop the folder anywhere
+### Requirements
 
-Clone or copy the repo. The examples below assume `C:\Users\<you>\Desktop\wifi` — if you put it somewhere else, swap the path.
+- Windows 10 or 11
+- PowerShell 5.1+ (built-in on every modern Windows)
+- A SLIIT account
+
+### 1. Clone the repo
 
 ```powershell
-git clone <this-repo> "C:\Users\$env:UserName\Desktop\wifi"
+git clone https://github.com/<your-username>/sliit-wifi.git "C:\Users\$env:UserName\Desktop\sliit-wifi"
+cd "C:\Users\$env:UserName\Desktop\sliit-wifi"
 ```
 
-### 2. Run setup (once)
+### 2. Run setup
 
-Double-click **`setup.cmd`**, or from PowerShell:
+Double-click **`setup.cmd`**, or:
 
 ```powershell
-cd C:\Users\$env:UserName\Desktop\wifi
 .\setup.cmd
 ```
 
-You'll get prompted for:
+You'll be prompted for:
 
 ```
-SLIIT username (e.g. it24103322): <your username>
+SLIIT username (e.g. it12345678): <your username>
 SLIIT password: ****************
 ```
 
-Enter **your own** SLIIT credentials — the same ones you'd type on the portal page. They get encrypted into `creds.xml` using DPAPI; the script never stores them in plaintext and never sends them anywhere except the SLIIT portal itself.
+Enter **your own** SLIIT credentials. They're saved to `creds.xml`, encrypted with Windows DPAPI — only **your** Windows user account can decrypt them.
 
-After that, `setup.cmd` registers a Scheduled Task called `SLIIT Wifi Auto-Login`. You're done.
+`setup.cmd` then registers the Scheduled Task. **You're done.**
 
-### 3. Connect to SLIIT Wi-Fi
+### 3. Connect to SLIIT-STD
 
-That's it. The next time your machine joins SLIIT's network, you'll have internet within ~4 seconds with no interaction.
+Next time your laptop joins SLIIT Wi-Fi, you'll have internet within seconds. No clicks, no popups.
 
 ---
 
-## How it works
+## 📱 Bonus: one-tap login on your phone (free, any device)
 
-1. **Scheduled Task triggers** on either:
-   - User logon, or
-   - NetworkProfile event `10000` (fires on every Wi-Fi connect), with a 3-second delay so DHCP/DNS settle.
-2. **Task runs `SLIIT Wifi.vbs`**, which invokes `login.ps1` completely hidden (no window flash).
-3. **`login.ps1` probes** `http://www.msftconnecttest.com/connecttest.txt`.
-   - Response body is `Microsoft Connect Test` → you're online → exit.
-   - Response is redirected to `auth.sliit.lk:1003/fgtauth?<magic>` → you're gated → continue.
-4. **Extract the `magic` token** from the FortiGate form (regex on the HTML, with URL fallback).
-5. **POST** `{ magic, 4Tredir, username, password }` to `http://auth.sliit.lk:1003/`.
-6. **Log the result** to `login.log` and exit with a status code.
+Phones can't run Scheduled Tasks, but a **bookmarklet** gets you within one tap of the same experience. Works on iPhone Safari and Android Chrome (Firefox too).
 
-Retries up to 3 times with exponential backoff if the probe or POST fails.
+### The bookmarklet
+
+```javascript
+javascript:(function(){var u=document.querySelector('input[name="username"]')||document.querySelector('input[type="text"]');var p=document.querySelector('input[name="password"]')||document.querySelector('input[type="password"]');if(!u||!p){alert('Not on SLIIT login page');return;}u.value='YOUR_USERNAME';p.value='YOUR_PASSWORD';(u.form||document.forms[0]).submit();})();
+```
+
+Replace `YOUR_USERNAME` and `YOUR_PASSWORD` with your own.
+
+> ⚠️ If your password contains `#`, escape it as `\x23` (URLs treat `#` as an anchor and would chop your bookmark in half).
+
+### Setup
+
+1. Bookmark any random page in your phone browser.
+2. Edit the bookmark.
+3. Replace the URL with the `javascript:...` line above (with your credentials).
+4. Save it as `SLIIT Login`.
+
+### Daily use
+
+1. Connect to SLIIT-STD, **swipe away** the "Sign in to network" notification.
+2. Open Chrome/Safari → type `neverssl.com` → you get redirected to the SLIIT portal.
+3. Tap your bookmark → done.
+
+> **Android Chrome quirk:** Chrome silently strips `javascript:` from bookmark URLs sometimes. If your bookmark doesn't fire, edit it and manually retype `javascript:` at the start of the URL. If even that fails, tap the address bar, type `SLIIT`, and tap the bookmark **suggestion** — that always works.
+
+---
+
+## Customizing for a different captive portal
+
+This tool is built for SLIIT but the FortiGate `fgtauth` flow is **identical across many universities and offices**. To adapt it:
+
+Open `login.ps1` and edit the **Configurable** section near the top:
+
+```powershell
+# Skip the login flow if the current Wi-Fi SSID doesn't match this wildcard.
+$SsidFilter = '*SLIIT*'   # Change to '*YourUni*' or set to $null to disable
+```
+
+The portal URL is auto-discovered from the JS-redirect, so you usually don't need to change anything else. If your network's portal lives somewhere unusual:
+
+- **Probe URL** (`$probeUrl`) — defaults to `http://www.msftconnecttest.com/connecttest.txt`. Change if your network whitelists this.
+- **Token regex** — currently matches FortiGate's `name="magic"` field with a hex value. If your portal uses a different token name, edit the parsing block in the main login flow.
+
+The architecture is designed to be portable. Open an issue if you hit a portal we don't handle.
 
 ---
 
@@ -89,10 +152,33 @@ Retries up to 3 times with exponential backoff if the probe or POST fails.
 |---|---|
 | Force a login right now | `Start-ScheduledTask -TaskName 'SLIIT Wifi Auto-Login'` |
 | See what the script did last | `Get-Content .\login.log -Tail 20` |
+| Manual click-to-login | Double-click `login-now.cmd` |
+| Dry-run (parse but don't submit) | `powershell -File .\login.ps1 -DryRun` |
 | Change saved password | `powershell -File .\login.ps1 -Setup` |
 | Re-install the scheduled task | `powershell -File .\login.ps1 -Install` |
-| Remove the scheduled task | `powershell -File .\login.ps1 -Uninstall` |
-| Run the full flow manually | `powershell -File .\login.ps1` |
+| Disable auto-login temporarily | `Disable-ScheduledTask -TaskName 'SLIIT Wifi Auto-Login'` |
+| Re-enable auto-login | `Enable-ScheduledTask -TaskName 'SLIIT Wifi Auto-Login'` |
+| Remove everything | `powershell -File .\login.ps1 -Uninstall` |
+
+---
+
+## How it works (technical)
+
+1. **Scheduled Task triggers** on either:
+   - User logon, or
+   - NetworkProfile event ID `10000` (fires on every Wi-Fi connect), with a 3-second delay so DHCP/DNS settle.
+2. **Task runs `SLIIT Wifi.vbs`**, a tiny VBScript wrapper that invokes `login.ps1` with `wscript.exe -WindowStyle Hidden` — completely silent, no flashing window.
+3. **`login.ps1` checks the SSID** via `netsh wlan show interfaces`. If it doesn't match `*SLIIT*`, exits immediately (~50 ms).
+4. **Probe** `http://www.msftconnecttest.com/connecttest.txt`. Two outcomes:
+   - Body is `Microsoft Connect Test` and no redirect → already online → exit.
+   - Body is FortiGate's interception page (`<script>window.location="..."</script>`) → continue.
+5. **Follow the JS redirect manually** to `https://auth.sliit.lk:1003/fgtauth?<magic>`.
+6. **Parse the `magic` token** from the form HTML (or fall back to URL query string).
+7. **POST** `{ magic, 4Tredir, username, password }` to `https://auth.sliit.lk:1003/`.
+8. **Re-probe** the connectivity-test URL. Body of `Microsoft Connect Test` = success. Anything else = failure.
+9. **Log the result** to `login.log` and exit.
+
+Up to 3 retries with exponential backoff if the probe or POST fails.
 
 ---
 
@@ -100,23 +186,26 @@ Retries up to 3 times with exponential backoff if the probe or POST fails.
 
 | Code | Meaning |
 |-----:|---|
-| `0` | Success — logged in, or already online |
+| `0` | Success — logged in, or already online, or off-network |
 | `1` | Unexpected error (see log) |
 | `2` | Portal rejected credentials — re-run `-Setup` |
-| `3` | Couldn't find the `magic` token — probably not on SLIIT |
+| `3` | Couldn't find the FortiGate `magic` token — probably not on a SLIIT-style portal |
 
 ---
 
-## Files
+## File layout
 
 ```
-wifi/
-├── login.ps1           # Main script (login / -Setup / -Install / -Uninstall)
+sliit-wifi/
+├── login.ps1           # Main script (login / -Setup / -Install / -Uninstall / -DryRun)
 ├── setup.cmd           # Double-click installer — runs -Setup then -Install
-├── SLIIT Wifi.vbs      # Silent launcher (wscript wrapper, no visible window)
-├── SLIIT Wifi.lnk      # Desktop shortcut (optional, for manual trigger)
-├── creds.xml           # DPAPI-encrypted credentials (generated by -Setup)
-├── login.log           # Rolling log (generated at runtime)
+├── login-now.cmd       # Click-to-login launcher (visible window, manual override)
+├── SLIIT Wifi.vbs      # Silent launcher (used by Scheduled Task; hides PowerShell window)
+├── SLIIT Wifi.lnk      # Optional Desktop shortcut
+├── creds.xml           # ⚠️ Generated — DPAPI-encrypted credentials (gitignored)
+├── login.log           # ⚠️ Generated — rolling log (gitignored)
+├── portal-debug.html   # ⚠️ Generated — first-run debug dump (gitignored)
+├── README.md
 └── .gitignore
 ```
 
@@ -124,40 +213,61 @@ wifi/
 
 ## Security notes
 
-- **`creds.xml` is DPAPI-sealed to your Windows account.** Another user on the same PC cannot decrypt it. A copy of the file on another machine is unusable.
-- **Nothing is transmitted to third parties.** The script only talks to `msftconnecttest.com` (the Windows-default captivity probe, returns a 20-byte static response) and `auth.sliit.lk:1003` (the FortiGate portal).
-- **The portal itself speaks plain HTTP** — that's on SLIIT, not on this tool. Your password traverses the campus LAN unencrypted regardless of how you submit it. Using this tool is no less safe than typing into the official portal page.
-- **Never commit `creds.xml` or `config.txt`.** The included `.gitignore` handles this.
+- **`creds.xml` is sealed by Windows DPAPI to your user account.** Another user on the same PC cannot decrypt it. Copying the file to another machine makes it unusable.
+- **Nothing is transmitted to third parties.** The script talks only to:
+  - `msftconnecttest.com` (Windows' own connectivity probe, returns a 22-byte static response)
+  - `auth.sliit.lk:1003` (the FortiGate portal — your credentials' destination)
+- **The portal speaks HTTPS** (custom port 1003) — your password is encrypted in transit.
+- **The bookmarklet stores credentials in your phone's bookmarks.** Treat it like any saved password — set a phone PIN/biometric.
+- **Never commit `creds.xml`, `config.txt`, or `login.log`.** The bundled `.gitignore` handles this.
 
 ---
 
 ## Troubleshooting
 
-**`login.log` says "Login FAILED"**
-Your saved password is wrong or expired. Fix with `powershell -File .\login.ps1 -Setup`.
+**Log says `Login FAILED — post-login probe still gated`**
+Wrong password or expired account. Fix with `powershell -File .\login.ps1 -Setup`.
 
-**Log says "No magic token" on SLIIT Wi-Fi**
-The portal HTML may have changed. Open an issue with a fresh screenshot of the portal page and a log snippet.
+**Log says `No magic token in response`**
+SLIIT's portal HTML changed, or you're on a different network. Send the contents of `portal-debug.html` along with a few log lines and we'll patch the regex.
 
 **Task runs but log doesn't update**
-Check the Scheduled Task's `LastTaskResult` — anything non-zero means the VBS or PowerShell couldn't start. Usually an `ExecutionPolicy` issue: re-run `setup.cmd`.
+Check `Get-ScheduledTaskInfo -TaskName 'SLIIT Wifi Auto-Login'` → `LastTaskResult`. Anything non-zero means the launcher couldn't start. Usually an `ExecutionPolicy` issue — re-run `setup.cmd`.
 
-**It works manually but not automatically**
-Open `taskschd.msc`, find `SLIIT Wifi Auto-Login`, check **History**. The most common cause is the task being configured for a different user account than the one you're logged in as. Re-run `-Install`.
+**Bookmarklet does nothing on Android**
+Chrome stripped the `javascript:` prefix. Edit the bookmark and manually retype `javascript:` at the start. If that fails, use the address-bar-suggestion trick: type the bookmark name in the URL bar and tap the suggestion (not the Go button).
+
+**SSID filter says "does not match" while on SLIIT**
+The actual SSID isn't `SLIIT-STD` on your campus. Check `netsh wlan show interfaces` for the real name and update `$SsidFilter` at the top of `login.ps1`.
 
 ---
 
 ## Uninstall
 
 ```powershell
-powershell -File .\login.ps1 -Uninstall      # remove the scheduled task
-Remove-Item .\creds.xml                      # delete encrypted credentials
+powershell -File .\login.ps1 -Uninstall
 ```
 
-Or just delete the whole folder after running `-Uninstall`.
+This removes the Scheduled Task and prompts whether to delete `creds.xml`. Confirm `y` to wipe credentials, or `n` to keep them. Add `-Force` to skip the prompt.
+
+---
+
+## Contributing
+
+Pull requests welcome — especially:
+
+- Adapters for non-FortiGate portals (Cisco ISE, Aruba ClearPass, Meraki, etc.)
+- macOS / Linux ports (the core logic is portable; just needs equivalent triggers)
+- Better SSID detection on Wi-Fi 7 / multi-adapter setups
+
+Please run `-DryRun` against your portal first and include the captured `portal-debug.html` (with sensitive bits redacted) in your PR.
 
 ---
 
 ## License
 
-Do whatever you want with this. No warranty — if SLIIT's IT catches feelings about automated portal logins, that's on you.
+MIT — do whatever you want with it. No warranty.
+
+---
+
+<sub>Built because typing `it12345678` and a password every morning is no way to live. 🍵</sub>
