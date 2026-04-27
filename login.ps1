@@ -149,7 +149,7 @@ function Invoke-Setup {
     Write-Host ''
     Write-Host 'SLIIT Wi-Fi credential setup' -ForegroundColor Cyan
     Write-Host '----------------------------'
-    $u = Read-Host 'SLIIT username (e.g. it24103322)'
+    $u = Read-Host 'SLIIT username (e.g. it12345678)'
     if (-not $u) { throw 'Username cannot be empty' }
     $p = Read-Host 'SLIIT password' -AsSecureString
     if ($p.Length -eq 0) { throw 'Password cannot be empty' }
