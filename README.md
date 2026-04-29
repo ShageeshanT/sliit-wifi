@@ -31,7 +31,7 @@ Once installed, **you never interact with this tool again**. It runs in the back
 4. POSTs your credentials over HTTPS
 5. Verifies you're online by re-probing the network
 
-All in **under 5 seconds**, with no window flash, no taskbar blip, no notification.
+All in **under 5 seconds**, with no window flash and no taskbar blip — just a tiny toast notification confirming success (`✓ Logged in to SLIIT in 1.2s`).
 
 On any other Wi-Fi (home, mobile hotspot, café), the script checks the SSID, sees it's not SLIIT, and exits silently. Zero impact when you're off-campus.
 
@@ -49,6 +49,8 @@ It's a single PowerShell script, no third-party libraries, no installer beyond W
 - **🤖 Auto-login on Wi-Fi connect** — Scheduled Task triggers on `NetworkProfile` event 10000 (logged every time Windows joins a network).
 - **🚦 SSID-aware** — only runs on networks matching `*SLIIT*`; pure no-op everywhere else.
 - **🛡️ Robust verification** — confirms login by re-probing, not by string-matching error pages. Retries with exponential backoff.
+- **🔔 Native toast notifications** — Windows toast on login success/failure (suppress with `-Quiet`).
+- **🩺 Built-in health check** — `login.ps1 -Doctor` diagnoses the entire system at a glance.
 - **🪵 Self-rotating logs** — `login.log` capped at 256 KB, automatically trimmed.
 - **🔍 Dry-run mode** — see exactly what the script would POST, without submitting.
 - **📱 Works on phones too** — bookmarklet for one-tap login on iPhone & Android (see below).
@@ -152,13 +154,60 @@ The architecture is designed to be portable. Open an issue if you hit a portal w
 |---|---|
 | Force a login right now | `Start-ScheduledTask -TaskName 'SLIIT Wifi Auto-Login'` |
 | See what the script did last | `Get-Content .\login.log -Tail 20` |
+| **Diagnose what's wrong** | `powershell -File .\login.ps1 -Doctor` |
 | Manual click-to-login | Double-click `login-now.cmd` |
 | Dry-run (parse but don't submit) | `powershell -File .\login.ps1 -DryRun` |
 | Change saved password | `powershell -File .\login.ps1 -Setup` |
 | Re-install the scheduled task | `powershell -File .\login.ps1 -Install` |
+| Suppress toast notifications | Add `-Quiet` to any login.ps1 command |
 | Disable auto-login temporarily | `Disable-ScheduledTask -TaskName 'SLIIT Wifi Auto-Login'` |
 | Re-enable auto-login | `Enable-ScheduledTask -TaskName 'SLIIT Wifi Auto-Login'` |
 | Remove everything | `powershell -File .\login.ps1 -Uninstall` |
+
+---
+
+## 🩺 Health check (`-Doctor`)
+
+When something feels off, run one command instead of digging through logs:
+
+```powershell
+powershell -File .\login.ps1 -Doctor
+```
+
+Sample output:
+
+```
+SLIIT Wi-Fi Auto-Login - Health Check
+-----------------------------------------
+[OK] Credentials saved      (it12345678)
+[OK] Scheduled task active  (last run: 04/29 10:46, exit 0)
+[OK] On Wi-Fi               (SLIIT-STD - matches filter '*SLIIT*')
+[OK] Connectivity           online (no captive portal)
+
+Recent log:
+  10:46:12  Login OK - post-login probe confirms online
+  10:46:53  Already online - exiting
+
+All checks passed.
+```
+
+Each check produces one of:
+- `[OK]` — green, all good
+- `[!]` — yellow, working but suboptimal (e.g. wrong SSID, gated state)
+- `[X]` — red, broken (each one prints the exact command to fix it)
+
+This is the first thing to run when reporting a bug, opening an issue, or asking for help.
+
+---
+
+## 🔔 Toast notifications
+
+The script fires a Windows toast on:
+- ✅ **Success** — `Logged in to SLIIT — Authenticated as it12345678 in 1.2s`
+- ❌ **Bad credentials** — `SLIIT login rejected — run setup.cmd to update password`
+- ❌ **Portal not found** — `Could not find a FortiGate captive portal`
+
+No toast fires when you're already authenticated (would be annoying). Suppress all toasts by adding `-Quiet` to any invocation, or for the scheduled task by editing `login-now.cmd` and the `.vbs` wrapper to pass `-Quiet`.
 
 ---
 

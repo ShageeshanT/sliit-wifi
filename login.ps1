@@ -6,6 +6,11 @@
 #   login.ps1 -Setup     - interactively save DPAPI-encrypted credentials
 #   login.ps1 -Install   - register the scheduled task (on-logon + on-network-connect)
 #   login.ps1 -Uninstall - remove the scheduled task (prompts to delete creds too)
+#   login.ps1 -Doctor    - print a health check of the entire system
+#
+# Flags:
+#   -Quiet               - suppress toast notifications (logs still write)
+#   -Force               - skip "delete creds.xml?" prompt during -Uninstall
 #
 # Credentials are stored in creds.xml via Export-Clixml - DPAPI-encrypted under
 # the current Windows user. No other account on this machine can decrypt them.
@@ -16,7 +21,9 @@ param(
     [switch]$Install,
     [switch]$Uninstall,
     [switch]$DryRun,
-    [switch]$Force     # skip "delete creds.xml?" prompt during -Uninstall
+    [switch]$Doctor,
+    [switch]$Quiet,
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,6 +69,56 @@ Invoke-LogRotation
 function Write-Log($msg) {
     $line = "{0}  {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg
     try { Add-Content -Path $logPath -Value $line -Encoding utf8 } catch { }
+}
+
+# ---------------------------------------------------------------------------
+# Toast notifications (Windows 10/11 native, no extra modules)
+# ---------------------------------------------------------------------------
+$ToastAppId = 'SLIIT.WiFi.AutoLogin'
+
+function Register-ToastAppId {
+    # One-time registration so toasts attribute to "SLIIT Wi-Fi" instead of
+    # "PowerShell". Idempotent.
+    $regPath = "HKCU:\Software\Classes\AppUserModelId\$ToastAppId"
+    if (Test-Path $regPath) { return }
+    try {
+        New-Item -Path $regPath -Force | Out-Null
+        Set-ItemProperty -Path $regPath -Name DisplayName -Value 'SLIIT Wi-Fi'
+        Set-ItemProperty -Path $regPath -Name ShowInSettings -Value 0 -Type DWord
+    } catch { }
+}
+
+function Show-LoginToast {
+    param(
+        [Parameter(Mandatory)][ValidateSet('Success','Failure','Warning')]
+        [string]$Type,
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter(Mandatory)][string]$Message
+    )
+    if ($Quiet) { return }
+    try {
+        Register-ToastAppId
+        # Load WinRT assemblies (lazy; only when actually showing a toast)
+        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+        [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+
+        # XML-escape the dynamic strings
+        $titleEsc = [System.Security.SecurityElement]::Escape($Title)
+        $msgEsc   = [System.Security.SecurityElement]::Escape($Message)
+
+        $template = @"
+<toast><visual><binding template="ToastGeneric">
+<text>$titleEsc</text>
+<text>$msgEsc</text>
+</binding></visual></toast>
+"@
+        $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+        $xml.LoadXml($template)
+        $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($ToastAppId).Show($toast)
+    } catch {
+        Write-Log "Toast failed: $($_.Exception.Message)"
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -235,17 +292,126 @@ function Invoke-Uninstall {
 }
 
 # ---------------------------------------------------------------------------
+# -Doctor : health-check diagnostic
+# ---------------------------------------------------------------------------
+function Invoke-Doctor {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+    $issues = 0
+    function Mark-Issue { $script:issues++ }
+
+    Write-Host ''
+    Write-Host 'SLIIT Wi-Fi Auto-Login - Health Check' -ForegroundColor Cyan
+    Write-Host ('-' * 41)
+
+    # --- 1. Credentials ----------------------------------------------------
+    if (Test-Path $credPath) {
+        try {
+            $cred = Import-Clixml $credPath
+            Write-Host ("[OK] Credentials saved      ({0})" -f $cred.UserName) -ForegroundColor Green
+        } catch {
+            Write-Host '[X]  Credentials unreadable - run: powershell -File login.ps1 -Setup' -ForegroundColor Red
+            Mark-Issue
+        }
+    } else {
+        Write-Host '[X]  No credentials saved   - run: powershell -File login.ps1 -Setup' -ForegroundColor Red
+        Mark-Issue
+    }
+
+    # --- 2. Scheduled task -------------------------------------------------
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($task) {
+        $info = Get-ScheduledTaskInfo -TaskName $taskName
+        $lastRun = if ($info.LastRunTime -gt [datetime]'2000-01-01') {
+            $info.LastRunTime.ToString('MM/dd HH:mm')
+        } else { 'never' }
+        $exit = $info.LastTaskResult
+        if ($task.State -eq 'Disabled') {
+            Write-Host '[!]  Scheduled task         disabled - re-enable: Enable-ScheduledTask -TaskName ''SLIIT Wifi Auto-Login''' -ForegroundColor Yellow
+            Mark-Issue
+        } elseif ($exit -eq 0 -or $exit -eq 267011) {
+            # 267011 = task has not yet run (fresh install)
+            Write-Host ("[OK] Scheduled task active  (last run: {0}, exit {1})" -f $lastRun, $exit) -ForegroundColor Green
+        } else {
+            Write-Host ("[!]  Scheduled task         last failed (last run: {0}, exit 0x{1:X})" -f $lastRun, $exit) -ForegroundColor Yellow
+            Write-Host '     Check log: Get-Content login.log -Tail 20'
+            Mark-Issue
+        }
+    } else {
+        Write-Host '[X]  Task not registered    - run: powershell -File login.ps1 -Install' -ForegroundColor Red
+        Mark-Issue
+    }
+
+    # --- 3. SSID -----------------------------------------------------------
+    $currSsid = Get-CurrentSsid
+    if ($currSsid) {
+        if (-not $SsidFilter -or ($currSsid -like $SsidFilter)) {
+            Write-Host ("[OK] On Wi-Fi               ({0} - matches filter '{1}')" -f $currSsid, $SsidFilter) -ForegroundColor Green
+        } else {
+            Write-Host ("[!]  On Wi-Fi               ({0} - does not match filter '{1}')" -f $currSsid, $SsidFilter) -ForegroundColor Yellow
+            Write-Host "     Edit `$SsidFilter at top of login.ps1 if this is your campus network."
+        }
+    } else {
+        Write-Host '[!]  No Wi-Fi SSID detected (wired or disconnected)' -ForegroundColor Yellow
+    }
+
+    # --- 4. Connectivity / portal ------------------------------------------
+    Write-Host '[..] Probing connectivity...' -NoNewline
+    $state = Test-PortalState
+    Write-Host "`r" -NoNewline
+    switch ($state.Status) {
+        'Online' {
+            Write-Host ("[OK] Connectivity           online (no captive portal)              ") -ForegroundColor Green
+        }
+        'Gated' {
+            $hint = ''
+            if ($state.Response.Content -match 'fgtauth\?([0-9a-fA-F]+)') {
+                $token = $Matches[1]
+                $short = $token.Substring(0, [Math]::Min(8, $token.Length))
+                $hint = " (FortiGate, magic=${short}...)"
+            }
+            Write-Host ("[!]  Connectivity           gated by captive portal$hint    ") -ForegroundColor Yellow
+            Write-Host '     Run: powershell -File login.ps1   # to log in now'
+        }
+        'Offline' {
+            Write-Host ("[X]  Connectivity           offline ({0})    " -f $state.Error) -ForegroundColor Red
+            Mark-Issue
+        }
+    }
+
+    # --- Recent log --------------------------------------------------------
+    Write-Host ''
+    Write-Host 'Recent log:' -ForegroundColor Cyan
+    if (Test-Path $logPath) {
+        Get-Content $logPath -Tail 5 | ForEach-Object { Write-Host "  $_" }
+    } else {
+        Write-Host '  (no log file yet)'
+    }
+
+    # --- Summary -----------------------------------------------------------
+    Write-Host ''
+    if ($issues -eq 0) {
+        Write-Host 'All checks passed.' -ForegroundColor Green
+    } else {
+        Write-Host ("{0} issue(s) found - see above for fixes." -f $issues) -ForegroundColor Yellow
+    }
+    Write-Host ''
+}
+
+# ---------------------------------------------------------------------------
 # Mode dispatch
 # ---------------------------------------------------------------------------
 if ($Setup)     { Invoke-Setup;     exit 0 }
 if ($Install)   { Invoke-Install;   exit 0 }
 if ($Uninstall) { Invoke-Uninstall; exit 0 }
+if ($Doctor)    { Invoke-Doctor;    exit 0 }
 
 # ---------------------------------------------------------------------------
 # Default mode: run login flow
 # ---------------------------------------------------------------------------
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $loginStart = Get-Date
 
     # --- SSID filter (skip cheap & early if not on SLIIT) ------------------
     $ssid = Get-CurrentSsid
@@ -327,6 +493,8 @@ try {
             Write-Log 'No magic token in response - not on SLIIT portal? Will retry.'
             if ($i -lt $attempts) { Start-Sleep -Seconds ([int][Math]::Pow(2, $i)); continue }
             Write-Log "Giving up after $attempts attempts."
+            Show-LoginToast -Type Failure -Title 'SLIIT login: portal not detected' `
+                            -Message 'Could not find a FortiGate captive portal. May not be on a SLIIT network.'
             exit 3
         }
 
@@ -379,7 +547,10 @@ try {
         Start-Sleep -Seconds 1
         $verify = Test-PortalState
         if ($verify.Status -eq 'Online') {
+            $elapsed = [Math]::Round(((Get-Date) - $loginStart).TotalSeconds, 1)
             Write-Log "Login OK - post-login probe confirms online ($($verify.FinalUrl))."
+            Show-LoginToast -Type Success -Title 'Logged in to SLIIT' `
+                            -Message "Authenticated as $user in ${elapsed}s"
             exit 0
         }
         Write-Log "Login FAILED - post-login probe still gated/offline: status=$($verify.Status) url=$($verify.FinalUrl)"
@@ -388,10 +559,14 @@ try {
             Start-Sleep -Seconds ([int][Math]::Pow(2, $i))
             continue
         }
+        Show-LoginToast -Type Failure -Title 'SLIIT login rejected' `
+                        -Message 'Portal did not accept credentials. Run setup.cmd to update password.'
         exit 2
     }
 }
 catch {
     Write-Log "ERROR: $($_.Exception.Message)"
+    Show-LoginToast -Type Failure -Title 'SLIIT auto-login error' `
+                    -Message $_.Exception.Message
     exit 1
 }
