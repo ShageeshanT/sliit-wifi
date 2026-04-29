@@ -74,22 +74,31 @@ cd "C:\Users\$env:UserName\Desktop\sliit-wifi"
 
 ### 2. Run setup
 
-Double-click **`setup.cmd`**, or:
-
-```powershell
-.\setup.cmd
-```
-
-You'll be prompted for:
+Double-click **`setup.cmd`** — a small setup window opens:
 
 ```
-SLIIT username (e.g. it12345678): <your username>
-SLIIT password: ****************
+┌─────────────────────────────────────────────┐
+│ SLIIT Wi-Fi Auto-Login                      │
+├─────────────────────────────────────────────┤
+│ Enter your SLIIT credentials. Encrypted     │
+│ with Windows DPAPI — only your account on   │
+│ this PC can decrypt.                        │
+│                                             │
+│ Username (e.g. it12345678)                  │
+│ [it12345678                              ]  │
+│                                             │
+│ Password                                    │
+│ [••••••••••••                            ]  │
+│                                             │
+│ [✓] Also install auto-login (recommended)   │
+│                                             │
+│                          [ Save ] [Cancel]  │
+└─────────────────────────────────────────────┘
 ```
 
-Enter **your own** SLIIT credentials. They're saved to `creds.xml`, encrypted with Windows DPAPI — only **your** Windows user account can decrypt them.
+Enter **your own** SLIIT credentials, hit **Save**. The credentials are saved to `creds.xml` encrypted with Windows DPAPI (only your Windows user account can decrypt), and the auto-login scheduled task registers automatically. **You're done.**
 
-`setup.cmd` then registers the Scheduled Task. **You're done.**
+> Prefer the command line? Run `powershell -File .\login.ps1 -SetupConsole` instead.
 
 ### 3. Connect to SLIIT-STD
 

@@ -3,12 +3,13 @@
 # https://github.com/ShageeshanT/sliit-wifi
 #
 # Modes:
-#   login.ps1            - run the login flow (default)
-#   login.ps1 -DryRun    - full flow except the final POST; prints what it would send
-#   login.ps1 -Setup     - interactively save DPAPI-encrypted credentials
-#   login.ps1 -Install   - register the scheduled task (on-logon + on-network-connect)
-#   login.ps1 -Uninstall - remove the scheduled task (prompts to delete creds too)
-#   login.ps1 -Doctor    - print a health check of the entire system
+#   login.ps1                - run the login flow (default)
+#   login.ps1 -DryRun        - full flow except the final POST; prints what it would send
+#   login.ps1 -Setup         - GUI setup: enter credentials and install the task
+#   login.ps1 -SetupConsole  - same as -Setup but via console prompts (no GUI)
+#   login.ps1 -Install       - register the scheduled task (on-logon + on-network-connect)
+#   login.ps1 -Uninstall     - remove the scheduled task (prompts to delete creds too)
+#   login.ps1 -Doctor        - print a health check of the entire system
 #
 # Flags:
 #   -Quiet               - suppress toast notifications (logs still write)
@@ -20,6 +21,7 @@
 [CmdletBinding()]
 param(
     [switch]$Setup,
+    [switch]$SetupConsole,
     [switch]$Install,
     [switch]$Uninstall,
     [switch]$DryRun,
@@ -202,9 +204,9 @@ function Test-PortalState {
 }
 
 # ---------------------------------------------------------------------------
-# -Setup
+# -SetupConsole : original CLI prompts (for power users / scripted installs)
 # ---------------------------------------------------------------------------
-function Invoke-Setup {
+function Invoke-SetupConsole {
     Write-Host ''
     Write-Host 'SLIIT Wi-Fi credential setup' -ForegroundColor Cyan
     Write-Host '----------------------------'
@@ -220,6 +222,169 @@ function Invoke-Setup {
     Write-Host ''
     Write-Host 'OK - credentials saved (DPAPI-encrypted) to:' -ForegroundColor Green
     Write-Host "  $credPath"
+}
+
+# ---------------------------------------------------------------------------
+# -Setup : WinForms GUI (default user-facing setup experience)
+# ---------------------------------------------------------------------------
+function Invoke-SetupGui {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    # --- Form ---------------------------------------------------------------
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text             = 'SLIIT Wi-Fi Setup'
+    $form.Size             = New-Object System.Drawing.Size(460, 380)
+    $form.StartPosition    = 'CenterScreen'
+    $form.FormBorderStyle  = 'FixedDialog'
+    $form.MaximizeBox      = $false
+    $form.MinimizeBox      = $false
+    $form.Topmost          = $true
+    $form.BackColor        = [System.Drawing.Color]::White
+    $form.Font             = New-Object System.Drawing.Font('Segoe UI', 9)
+
+    # --- Header -------------------------------------------------------------
+    $header           = New-Object System.Windows.Forms.Label
+    $header.Text      = 'SLIIT Wi-Fi Auto-Login'
+    $header.Font      = New-Object System.Drawing.Font('Segoe UI', 14, [System.Drawing.FontStyle]::Bold)
+    $header.ForeColor = [System.Drawing.Color]::FromArgb(0, 60, 120)
+    $header.Location  = New-Object System.Drawing.Point(24, 18)
+    $header.Size      = New-Object System.Drawing.Size(400, 28)
+    $form.Controls.Add($header)
+
+    # --- Subheader ----------------------------------------------------------
+    $sub          = New-Object System.Windows.Forms.Label
+    $sub.Text     = 'Enter your SLIIT credentials. Encrypted with Windows DPAPI - only your account on this PC can decrypt.'
+    $sub.Location = New-Object System.Drawing.Point(24, 50)
+    $sub.Size     = New-Object System.Drawing.Size(400, 36)
+    $sub.ForeColor = [System.Drawing.Color]::DimGray
+    $form.Controls.Add($sub)
+
+    # --- Username -----------------------------------------------------------
+    $userLbl          = New-Object System.Windows.Forms.Label
+    $userLbl.Text     = 'Username (e.g. it12345678)'
+    $userLbl.Location = New-Object System.Drawing.Point(24, 100)
+    $userLbl.Size     = New-Object System.Drawing.Size(300, 20)
+    $form.Controls.Add($userLbl)
+
+    $userBox          = New-Object System.Windows.Forms.TextBox
+    $userBox.Location = New-Object System.Drawing.Point(24, 122)
+    $userBox.Size     = New-Object System.Drawing.Size(400, 25)
+    $userBox.Font     = New-Object System.Drawing.Font('Segoe UI', 10)
+    $form.Controls.Add($userBox)
+
+    # --- Password -----------------------------------------------------------
+    $passLbl          = New-Object System.Windows.Forms.Label
+    $passLbl.Text     = 'Password'
+    $passLbl.Location = New-Object System.Drawing.Point(24, 158)
+    $passLbl.Size     = New-Object System.Drawing.Size(120, 20)
+    $form.Controls.Add($passLbl)
+
+    $passBox          = New-Object System.Windows.Forms.TextBox
+    $passBox.Location = New-Object System.Drawing.Point(24, 180)
+    $passBox.Size     = New-Object System.Drawing.Size(400, 25)
+    $passBox.Font     = New-Object System.Drawing.Font('Segoe UI', 10)
+    $passBox.UseSystemPasswordChar = $true
+    $form.Controls.Add($passBox)
+
+    # --- Install task checkbox ---------------------------------------------
+    $taskCb          = New-Object System.Windows.Forms.CheckBox
+    $taskCb.Text     = 'Also install auto-login (recommended)'
+    $taskCb.Location = New-Object System.Drawing.Point(24, 220)
+    $taskCb.Size     = New-Object System.Drawing.Size(400, 25)
+    $taskCb.Checked  = $true
+    $form.Controls.Add($taskCb)
+
+    # --- Status label -------------------------------------------------------
+    $status          = New-Object System.Windows.Forms.Label
+    $status.Location = New-Object System.Drawing.Point(24, 252)
+    $status.Size     = New-Object System.Drawing.Size(400, 38)
+    $status.ForeColor = [System.Drawing.Color]::DimGray
+    $form.Controls.Add($status)
+
+    # --- Buttons ------------------------------------------------------------
+    $save             = New-Object System.Windows.Forms.Button
+    $save.Text        = 'Save'
+    $save.Location    = New-Object System.Drawing.Point(254, 298)
+    $save.Size        = New-Object System.Drawing.Size(80, 32)
+    $save.BackColor   = [System.Drawing.Color]::FromArgb(0, 120, 212)
+    $save.ForeColor   = [System.Drawing.Color]::White
+    $save.FlatStyle   = 'Flat'
+    $save.FlatAppearance.BorderSize = 0
+    $form.Controls.Add($save)
+    $form.AcceptButton = $save
+
+    $cancel           = New-Object System.Windows.Forms.Button
+    $cancel.Text      = 'Cancel'
+    $cancel.Location  = New-Object System.Drawing.Point(344, 298)
+    $cancel.Size      = New-Object System.Drawing.Size(80, 32)
+    $cancel.FlatStyle = 'Flat'
+    $form.Controls.Add($cancel)
+    $form.CancelButton = $cancel
+
+    # --- Pre-fill if creds already exist ------------------------------------
+    if (Test-Path $credPath) {
+        try {
+            $existing = Import-Clixml $credPath
+            $userBox.Text = $existing.UserName
+            $sub.Text = "Update credentials for $($existing.UserName), or enter a different account."
+            $passBox.Focus() | Out-Null
+        } catch { }
+    } else {
+        $userBox.Focus() | Out-Null
+    }
+
+    # --- Save handler -------------------------------------------------------
+    $save.Add_Click({
+        $u = $userBox.Text.Trim()
+        $p = $passBox.Text
+        if (-not $u) {
+            $status.Text = 'Username cannot be empty.'
+            $status.ForeColor = [System.Drawing.Color]::Crimson
+            $userBox.Focus() | Out-Null
+            return
+        }
+        if (-not $p) {
+            $status.Text = 'Password cannot be empty.'
+            $status.ForeColor = [System.Drawing.Color]::Crimson
+            $passBox.Focus() | Out-Null
+            return
+        }
+        try {
+            $save.Enabled = $false
+            $cancel.Enabled = $false
+            $status.Text = 'Saving credentials...'
+            $status.ForeColor = [System.Drawing.Color]::DimGray
+            $form.Refresh()
+
+            $sec = ConvertTo-SecureString $p -AsPlainText -Force
+            Save-PortalCredential -User $u -SecPass $sec
+            if (Test-Path $oldCfg) { Remove-Item $oldCfg -Force }
+
+            if ($taskCb.Checked) {
+                $status.Text = 'Installing auto-login scheduled task...'
+                $form.Refresh()
+                Invoke-Install | Out-Null
+                $status.Text = "All set. Auto-login will fire next time you join SLIIT-STD."
+            } else {
+                $status.Text = 'Credentials saved. Auto-login NOT installed (use -Install later).'
+            }
+            $status.ForeColor = [System.Drawing.Color]::SeaGreen
+
+            # Auto-close after 1.5s
+            $timer = New-Object System.Windows.Forms.Timer
+            $timer.Interval = 1500
+            $timer.Add_Tick({ $timer.Stop(); $form.Close() })
+            $timer.Start()
+        } catch {
+            $status.Text = "Error: $($_.Exception.Message)"
+            $status.ForeColor = [System.Drawing.Color]::Crimson
+            $save.Enabled = $true
+            $cancel.Enabled = $true
+        }
+    })
+
+    [void]$form.ShowDialog()
 }
 
 # ---------------------------------------------------------------------------
@@ -403,10 +568,11 @@ function Invoke-Doctor {
 # ---------------------------------------------------------------------------
 # Mode dispatch
 # ---------------------------------------------------------------------------
-if ($Setup)     { Invoke-Setup;     exit 0 }
-if ($Install)   { Invoke-Install;   exit 0 }
-if ($Uninstall) { Invoke-Uninstall; exit 0 }
-if ($Doctor)    { Invoke-Doctor;    exit 0 }
+if ($Setup)        { Invoke-SetupGui;     exit 0 }
+if ($SetupConsole) { Invoke-SetupConsole; exit 0 }
+if ($Install)      { Invoke-Install;      exit 0 }
+if ($Uninstall)    { Invoke-Uninstall;    exit 0 }
+if ($Doctor)       { Invoke-Doctor;       exit 0 }
 
 # ---------------------------------------------------------------------------
 # Default mode: run login flow
