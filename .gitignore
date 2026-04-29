@@ -29,3 +29,7 @@ $RECYCLE.BIN/
 *.bak
 *.swp
 *~
+
+# --- Release artifacts (built locally, attached to GitHub releases) ---------
+sliit-wifi-v*.zip
+.release-notes-v*.md
