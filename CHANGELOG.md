@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-04-29
+
+### Added
+
+- **GUI setup window** — `setup.cmd` now opens a native Windows form with labelled username/password fields (password masked), an "also install auto-login" checkbox, and inline status feedback. Replaces the old console prompt experience.
+  - Pre-fills the username if credentials already exist (perfect for password updates)
+  - Validates inputs inline with red error messages — no popups
+  - Auto-closes 1.5s after successful save
+  - Hidden PowerShell host so users see only the form, no console window
+- **`-SetupConsole` flag** — original console-prompt setup is still available for power users and scripted installs.
+
+### Changed
+
+- `setup.cmd` now launches the GUI silently. Previous console-based setup behavior is available via `-SetupConsole`.
+
+---
+
 ## [1.0.0] - 2026-04-29
 
 First public release. Stable, in-production at SLIIT.
@@ -48,4 +65,5 @@ First public release. Stable, in-production at SLIIT.
 - Windows 11 23H2 + PowerShell 5.1
 - SLIIT-STD network (FortiGate captive portal at `https://auth.sliit.lk:1003`)
 
+[1.1.0]: https://github.com/ShageeshanT/sliit-wifi/releases/tag/v1.1.0
 [1.0.0]: https://github.com/ShageeshanT/sliit-wifi/releases/tag/v1.0.0

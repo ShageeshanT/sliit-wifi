@@ -1,5 +1,5 @@
 # SLIIT Wi-Fi auto-login (FortiGate fgtauth captive portal)
-# Version: 1.0.0
+# Version: 1.1.0
 # https://github.com/ShageeshanT/sliit-wifi
 #
 # Modes:
